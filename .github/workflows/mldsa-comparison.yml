@@ -1,0 +1,65 @@
+name: Pretzel against ML-DSA
+
+# Started by hand only. Times each Pretzel crate against ML-DSA from AWS-LC at
+# a pinned commit, on one runner per parameter set, with the command that
+# bench/mldsa-comparison/README.md documents. The result tables are uploaded as
+# artifacts. This workflow is not one of the checks of rust.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: Rounds per parameter set
+        required: false
+        default: '100'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  MACOSX_DEPLOYMENT_TARGET: '15.2'
+
+jobs:
+  compare:
+    name: Pretzel level ${{ matrix.level }} against ML-DSA
+    runs-on: macos-15
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        level: ['3', '4', '5']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Describe the runner
+        run: |
+          sw_vers
+          uname -a
+          sysctl -n machdep.cpu.brand_string
+          sysctl -n hw.model
+          sysctl -n hw.ncpu
+          sysctl -n hw.memsize
+          for feature in FEAT_DIT FEAT_SHA3 FEAT_DotProd; do
+            echo "$feature=$(sysctl -n "hw.optional.arm.$feature")"
+          done
+          python3 --version
+          xcrun --sdk macosx clang --version
+          cmake --version
+          git rev-parse HEAD
+      - name: Self-test the script
+        run: python3 -B bench/mldsa-comparison/compare.py --self-test
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" --profile minimal
+          rustc -vV
+          cargo -V
+      - name: Build AWS-LC with the adapters and the two drivers, then measure them alternated
+        env:
+          ROUNDS: ${{ inputs.rounds }}
+        run: python3 -B bench/mldsa-comparison/compare.py --level "${{ matrix.level }}" --rounds "$ROUNDS"
+      - name: Upload the tables and the build logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mldsa-comparison-level${{ matrix.level }}
+          path: target/mldsa-comparison/results/
+          if-no-files-found: warn

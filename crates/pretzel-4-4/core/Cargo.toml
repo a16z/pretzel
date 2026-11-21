@@ -1,0 +1,30 @@
+[package]
+name = "pretzel-4-4-core"
+version = "0.4.0"
+edition = "2021"
+description = "Arithmetic, samplers, codecs and native code of Pretzel-(4,4)"
+license = "MIT OR Apache-2.0"
+publish = false
+autobins = false
+autotests = false
+autoexamples = false
+autobenches = false
+
+[lib]
+path = "src/lib.rs"
+test = false
+doctest = false
+
+[dependencies]
+sha3 = { version = "0.10.9", features = ["zeroize"] }
+keccak = { version = "0.1" }
+getrandom = "0.2"
+zeroize = "1.9"
+libc = { version = "=0.2.189" }
+
+[features]
+# Linked only by the known-answer executables.
+conformance = []
+# Off by default. Zeroes a fixed range of stack after key generation, after the
+# import of a stored secret key and after signing.
+stack-wipe = []

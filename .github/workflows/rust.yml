@@ -1,0 +1,560 @@
+name: Build and Test Pretzel
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+env:
+  # The three crates, the backend crates/pretzel-4-4/core and the three sampler
+  # crates are members of one workspace with one lockfile, one set of profiles
+  # and one target directory at the repository root; every cargo command names
+  # a manifest. The diagnostics tests are a separate package with their own
+  # workspace table and lockfile. The toolchain version comes from
+  # rust-toolchain.toml.
+  CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: '15.2'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  fmt:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned toolchain
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" --profile minimal --component rustfmt
+      - name: cargo fmt
+        run: |
+          set -euo pipefail
+          for crate in pretzel-4-4 pretzel-3-3 pretzel-5-5; do
+            cargo fmt --manifest-path "crates/$crate/Cargo.toml" --all -- --check
+          done
+
+  clippy:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      RUSTFLAGS: -C target-feature=+sha3,+dotprod
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned toolchain
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" --profile minimal --component clippy
+      # Each package in its default configuration and with the feature
+      # stack-wipe, which compiles the stack-range wipes and their tests.
+      - name: cargo clippy (each package, default features and stack-wipe)
+        run: |
+          set -uo pipefail
+          status=0
+          for manifest in \
+            crates/pretzel-4-4/Cargo.toml \
+            crates/pretzel-4-4/core/Cargo.toml \
+            crates/pretzel-3-3/Cargo.toml \
+            crates/pretzel-5-5/Cargo.toml; do
+            echo "::group::clippy $manifest"
+            cargo clippy --locked --release --manifest-path "$manifest" --all-targets -- -D warnings || status=1
+            echo "::endgroup::"
+            echo "::group::clippy $manifest, stack-wipe"
+            cargo clippy --locked --release --manifest-path "$manifest" --all-targets --features stack-wipe -- -D warnings || status=1
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+  typos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Allowlist and excluded data files in _typos.toml.
+      - uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1
+        with:
+          files: .
+
+  deny:
+    name: Cargo deny (${{ matrix.manifest }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The workspace graph (root lockfile) contains the three crates, core
+        # and the three sampler crates. The diagnostics tests are a separate
+        # package with their own lockfile. The stack-depth check builds a
+        # generated package with crates/pretzel-5-5/scripts/stack_depth_Cargo.lock;
+        # the last step requires its registry packages to be those of the
+        # root lockfile.
+        manifest:
+          - Cargo.toml
+          - crates/pretzel-4-4/tests/diagnostics/Cargo.toml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Policy in deny.toml at the repository root: RustSec advisories, the
+      # licence allowlist, and crates.io as the only source.
+      - uses: EmbarkStudios/cargo-deny-action@08f29ebbc9295095546acaf37220058f628a4720 # v2
+        with:
+          manifest-path: ${{ matrix.manifest }}
+          command: check --config deny.toml bans licenses sources advisories
+      - name: Require every registry package of the other lockfiles in the root lockfile
+        run: |
+          python3 - <<'PY'
+          import tomllib
+          def registry(path):
+              with open(path, 'rb') as f:
+                  return {(p['name'], p['version'], p['checksum']) for p in tomllib.load(f)['package'] if 'source' in p}
+          root = registry('Cargo.lock')
+          for path in ('crates/pretzel-5-5/scripts/stack_depth_Cargo.lock', 'crates/pretzel-4-4/tests/diagnostics/Cargo.lock'):
+              extra = registry(path) - root
+              assert not extra, (path, sorted(extra))
+          PY
+
+  doc:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned toolchain
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" --profile minimal
+      # The build scripts accept only AArch64 targets, so the documentation is
+      # built on the same runner as the tests. core is a path
+      # dependency of crates/pretzel-4-4 and is documented from its own manifest.
+      - name: cargo doc (each crate, no deps)
+        run: |
+          set -euo pipefail
+          for manifest in \
+            crates/pretzel-4-4/Cargo.toml \
+            crates/pretzel-4-4/core/Cargo.toml \
+            crates/pretzel-3-3/Cargo.toml \
+            crates/pretzel-5-5/Cargo.toml; do
+            cargo doc --locked --no-deps --manifest-path "$manifest"
+          done
+
+  generated:
+    name: Generated tables and assembly
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require Python 3.11 or newer
+        run: |
+          python3 --version
+          python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else "the generators need Python 3.11 or newer (tomllib)")'
+      - name: Check the generated files byte for byte
+        run: |
+          set -euo pipefail
+          python3 crates/pretzel-4-4/kat/gen_spec_tables.py --check
+          python3 crates/pretzel-4-4/core/generators/gen_public_tables.py --check
+          python3 crates/pretzel-4-4/core/generators/gen_assembly.py --check
+      # Pure Python. Recomputes from the sampler tables the largest values
+      # they can produce and compares them with the figures in the sources.
+      - name: Check the sampler bounds stated in the sources
+        run: python3 crates/pretzel-4-4/core/generators/check_sampler_bounds.py --check
+      # Pure Python. Rebuilds the record sets of the Pretzel-(5,5) proposal sampler with an
+      # integer model and compares their SHA-256 with the constants the Rust tests also hold.
+      - name: Check the generated sampler fixtures
+        run: python3 crates/pretzel-5-5/samplers/generators/gen_proposal_fixtures.py --check
+
+  certificate:
+    name: Rank-three spread certificate
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require Python 3.11 or newer
+        run: |
+          python3 --version
+          python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else "the certificate needs Python 3.11 or newer (tomllib)")'
+      # Pure Python. The self-test checks the exact small cases; --check reads
+      # the caps from the crate sources, recomputes the bounds and compares
+      # the result with certificate_r3.json byte for byte.
+      - name: Self-test and recompute the certificate
+        run: |
+          set -euo pipefail
+          python3 -B crates/pretzel-3-3/certificates/rank3-spread/certify_r3.py --self-test
+          python3 -B crates/pretzel-3-3/certificates/rank3-spread/certify_r3.py --check
+
+  reference-certificates:
+    name: Reference tables and certificates, Pretzel-(4,4) and Pretzel-(5,5)
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Python version
+        run: python3 --version
+      # Pure Python, standard library only. Reads the base and the weights
+      # from params.rs of each crate and recomputes every entry of the four
+      # reference tables: each count is the floor of 2^32 times the ideal mass.
+      - name: Recompute the reference tables
+        run: |
+          set -euo pipefail
+          python3 -B crates/pretzel-4-4/certificates/check_reference_tables.py --self-test
+          python3 -B crates/pretzel-4-4/certificates/check_reference_tables.py
+      # Pure Python, standard library only. Reads the caps and limits from
+      # the crate sources, recomputes the bounds of the reference row and
+      # compares the result with certificate_r5.json byte for byte.
+      - name: Recompute the Pretzel-(5,5) row certificate
+        run: |
+          set -euo pipefail
+          python3 -B crates/pretzel-5-5/certificates/rank5-dither/certify.py --check
+      # Pure Python, standard library only. The self-test checks the exact
+      # small cases; --check reads the caps from the crate sources, recomputes
+      # the bounds and compares the result with certificate_r4_spread.json
+      # byte for byte.
+      - name: Self-test and recompute the Pretzel-(4,4) spread certificate
+        run: |
+          set -euo pipefail
+          python3 -B crates/pretzel-4-4/certificates/rank4-spread/certify_r4_spread.py --self-test
+          python3 -B crates/pretzel-4-4/certificates/rank4-spread/certify_r4_spread.py --check
+
+  comparison-self-test:
+    name: Self-test of the comparison with ML-DSA
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require Python 3.11 or newer
+        run: |
+          python3 --version
+          python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else "the self-test needs Python 3.11 or newer (tomllib)")'
+      # Pure Python: the order of the processes, the statistic and the tables
+      # on mock data, and the agreement of the files of bench/mldsa-comparison
+      # with each other and with the release profile of the root manifest. It
+      # builds nothing; the comparison itself runs only in
+      # mldsa-comparison.yml, which is started by hand.
+      - name: Self-test the comparison script
+        run: python3 -B bench/mldsa-comparison/compare.py --self-test
+
+  test-pretzel:
+    name: Test Pretzel-(4,4), ${{ matrix.label }}
+    runs-on: macos-15
+    timeout-minutes: 120
+    # Both configurations: the default build, which wipes no stack range, and
+    # the build with the feature stack-wipe.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - wipe: ""
+            label: default build
+          - wipe: stack-wipe
+            label: stack-wipe
+    env:
+      WIPE: ${{ matrix.wipe }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require Apple silicon, macOS 15.2 and the CPU features the crates use
+        run: |
+          set -euo pipefail
+          sw_vers
+          test "$(uname -m)" = arm64
+          for feature in FEAT_DIT FEAT_SHA3 FEAT_DotProd; do
+            test "$(sysctl -n "hw.optional.arm.$feature")" = 1
+          done
+          python3 -c 'import platform; assert tuple(map(int, platform.mac_ver()[0].split(".")[:2])) >= (15, 2)'
+          xcrun --sdk macosx clang --version
+      - name: Install the pinned toolchain
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" --profile minimal
+      - name: Build the library
+        run: cargo build --locked --release --manifest-path crates/pretzel-4-4/Cargo.toml --lib ${WIPE:+--features "$WIPE"}
+      - name: Test the crate
+        env:
+          RUSTFLAGS: -C target-feature=+sha3,+dotprod
+        run: python3 crates/pretzel-4-4/scripts/run_counted_tests.py cargo test --locked --release --manifest-path crates/pretzel-4-4/Cargo.toml ${WIPE:+--features "$WIPE"} -- --test-threads=1
+      # The stack-painting tests exist exactly in the stack-wipe configuration.
+      # In it each must be listed, run and pass by name; in the default
+      # configuration none may be listed.
+      - name: Require the stack tests exactly in the stack-wipe configuration
+        env:
+          RUSTFLAGS: -C target-feature=+sha3,+dotprod
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --manifest-path crates/pretzel-4-4/Cargo.toml ${WIPE:+--features "$WIPE"} --test api -- --list > "$RUNNER_TEMP/api-tests.txt"
+          for name in prepared_signing_erases_the_stack_below_its_entry key_import_erases_the_stack_below_its_entry; do
+            if [ -n "$WIPE" ]; then
+              grep -qx "$name: test" "$RUNNER_TEMP/api-tests.txt"
+              cargo test --locked --release --manifest-path crates/pretzel-4-4/Cargo.toml --features "$WIPE" --test api "$name" -- --exact --test-threads=1 | tee "$RUNNER_TEMP/api-$name.txt"
+              grep -qF "test $name ... ok" "$RUNNER_TEMP/api-$name.txt"
+            elif grep -q "$name" "$RUNNER_TEMP/api-tests.txt"; then
+              echo "the default configuration lists $name"
+              exit 1
+            fi
+          done
+      - name: Test the backend
+        env:
+          RUSTFLAGS: -C target-feature=+sha3,+dotprod
+        run: python3 crates/pretzel-4-4/scripts/run_counted_tests.py cargo test --locked --release --manifest-path crates/pretzel-4-4/core/Cargo.toml --lib ${WIPE:+--features "$WIPE"} -- --test-threads=1
+      # The diagnostics package does not depend on the crate and has one configuration.
+      - name: Test the diagnostics package
+        if: matrix.wipe == ''
+        env:
+          RUSTFLAGS: -C target-feature=+sha3,+dotprod
+        run: python3 crates/pretzel-4-4/scripts/run_counted_tests.py cargo test --locked --release --manifest-path crates/pretzel-4-4/tests/diagnostics/Cargo.toml -- --test-threads=1
+      - name: Replay the known-answer vectors
+        run: python3 crates/pretzel-4-4/scripts/run_kat_replay.py --output "$RUNNER_TEMP/pretzel-kat-replay" ${WIPE:+--stack-wipe}
+
+  test-level3:
+    name: Test Pretzel-(3,3), ${{ matrix.label }}
+    runs-on: macos-15
+    timeout-minutes: 120
+    # Both configurations: the default build, which wipes no stack range, and
+    # the build with the feature stack-wipe.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - wipe: ""
+            label: default build
+          - wipe: stack-wipe
+            label: stack-wipe
+    env:
+      WIPE: ${{ matrix.wipe }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require Apple silicon, macOS 15.2 and the CPU features the crates use
+        run: |
+          set -euo pipefail
+          sw_vers
+          test "$(uname -m)" = arm64
+          for feature in FEAT_DIT FEAT_SHA3 FEAT_DotProd; do
+            test "$(sysctl -n "hw.optional.arm.$feature")" = 1
+          done
+          python3 -c 'import platform; assert tuple(map(int, platform.mac_ver()[0].split(".")[:2])) >= (15, 2)'
+          xcrun --sdk macosx clang --version
+      - name: Install the pinned toolchain
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" --profile minimal
+      - name: Build the library
+        run: cargo build --locked --release --manifest-path crates/pretzel-3-3/Cargo.toml --lib ${WIPE:+--features "$WIPE"}
+      - name: Test the library against its test list
+        env:
+          RUSTFLAGS: -C target-feature=+sha3,+dotprod
+        run: |
+          set -euo pipefail
+          python3 crates/pretzel-3-3/scripts/run_native_checks.py self-test
+          python3 crates/pretzel-3-3/scripts/run_native_checks.py tests ${WIPE:+--features "$WIPE"}
+      - name: Test the crate-root interface
+        env:
+          RUSTFLAGS: -C target-feature=+sha3,+dotprod
+        run: python3 crates/pretzel-4-4/scripts/run_counted_tests.py cargo test --locked --release --manifest-path crates/pretzel-3-3/Cargo.toml ${WIPE:+--features "$WIPE"} --test api -- --test-threads=1
+      # The stack-painting tests exist exactly in the stack-wipe configuration.
+      # In it each must be listed, run and pass by name; in the default
+      # configuration none may be listed.
+      - name: Require the stack tests exactly in the stack-wipe configuration
+        env:
+          RUSTFLAGS: -C target-feature=+sha3,+dotprod
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --manifest-path crates/pretzel-3-3/Cargo.toml ${WIPE:+--features "$WIPE"} --test api -- --list > "$RUNNER_TEMP/api-tests.txt"
+          for name in prepared_signing_erases_the_stack_below_its_entry key_import_erases_the_stack_below_its_entry; do
+            if [ -n "$WIPE" ]; then
+              grep -qx "$name: test" "$RUNNER_TEMP/api-tests.txt"
+              cargo test --locked --release --manifest-path crates/pretzel-3-3/Cargo.toml --features "$WIPE" --test api "$name" -- --exact --test-threads=1 | tee "$RUNNER_TEMP/api-$name.txt"
+              grep -qF "test $name ... ok" "$RUNNER_TEMP/api-$name.txt"
+            elif grep -q "$name" "$RUNNER_TEMP/api-tests.txt"; then
+              echo "the default configuration lists $name"
+              exit 1
+            fi
+          done
+      - name: Replay the known-answer file twice with byte comparison
+        run: python3 crates/pretzel-3-3/scripts/run_native_checks.py golden --output "$RUNNER_TEMP/level3-replay" ${WIPE:+--features "$WIPE"}
+      - name: Print the header, length and SHA-256 of the replayed known-answer output
+        if: always()
+        run: |
+          for name in first second; do
+            file="$RUNNER_TEMP/level3-replay/golden-$name.txt"
+            test -f "$file" || { echo "missing: golden-$name.txt"; continue; }
+            head -n 1 "$file"
+            wc -c < "$file"
+            shasum -a 256 "$file"
+            cmp "$file" crates/pretzel-3-3/conformance/known-answer.txt || true
+          done
+      - name: Check key and entropy consistency across two processes
+        run: python3 crates/pretzel-3-3/scripts/run_native_checks.py keys --output "$RUNNER_TEMP/level3-replay" ${WIPE:+--features "$WIPE"}
+
+  test-level5:
+    name: Test Pretzel-(5,5), ${{ matrix.label }}
+    runs-on: macos-15
+    timeout-minutes: 120
+    # Both configurations: the default build, which wipes no stack range, and
+    # the build with the feature stack-wipe.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - wipe: ""
+            label: default build
+          - wipe: stack-wipe
+            label: stack-wipe
+    env:
+      WIPE: ${{ matrix.wipe }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require Apple silicon, macOS 15.2 and the CPU features the crates use
+        run: |
+          set -euo pipefail
+          sw_vers
+          test "$(uname -m)" = arm64
+          for feature in FEAT_DIT FEAT_SHA3 FEAT_DotProd; do
+            test "$(sysctl -n "hw.optional.arm.$feature")" = 1
+          done
+          python3 -c 'import platform; assert tuple(map(int, platform.mac_ver()[0].split(".")[:2])) >= (15, 2)'
+          xcrun --sdk macosx clang --version
+      - name: Install the pinned toolchain
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" --profile minimal
+      - name: Build the library
+        run: cargo build --locked --release --manifest-path crates/pretzel-5-5/Cargo.toml --lib ${WIPE:+--features "$WIPE"}
+      - name: Test the crate
+        env:
+          RUSTFLAGS: -C target-feature=+sha3,+dotprod
+        run: python3 crates/pretzel-4-4/scripts/run_counted_tests.py cargo test --locked --release --manifest-path crates/pretzel-5-5/Cargo.toml ${WIPE:+--features "$WIPE"} -- --test-threads=1
+      # The stack-painting tests exist exactly in the stack-wipe configuration.
+      # In it each must be listed, run and pass by name; in the default
+      # configuration none may be listed.
+      - name: Require the stack tests exactly in the stack-wipe configuration
+        env:
+          RUSTFLAGS: -C target-feature=+sha3,+dotprod
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --manifest-path crates/pretzel-5-5/Cargo.toml ${WIPE:+--features "$WIPE"} --test api -- --list > "$RUNNER_TEMP/api-tests.txt"
+          for name in key_import_erases_the_stack_below_its_entry; do
+            if [ -n "$WIPE" ]; then
+              grep -qx "$name: test" "$RUNNER_TEMP/api-tests.txt"
+              cargo test --locked --release --manifest-path crates/pretzel-5-5/Cargo.toml --features "$WIPE" --test api "$name" -- --exact --test-threads=1 | tee "$RUNNER_TEMP/api-$name.txt"
+              grep -qF "test $name ... ok" "$RUNNER_TEMP/api-$name.txt"
+            elif grep -q "$name" "$RUNNER_TEMP/api-tests.txt"; then
+              echo "the default configuration lists $name"
+              exit 1
+            fi
+          done
+      # The sampler crates have one configuration.
+      - name: Test the proposal sampler
+        if: matrix.wipe == ''
+        env:
+          RUSTFLAGS: -C target-feature=+sha3,+dotprod
+        run: python3 crates/pretzel-4-4/scripts/run_counted_tests.py cargo test --locked --release --manifest-path crates/pretzel-5-5/samplers/proposal/Cargo.toml --lib -- --test-threads=1
+      - name: Test the transport samplers
+        if: matrix.wipe == ''
+        env:
+          RUSTFLAGS: -C target-feature=+sha3,+dotprod
+        run: |
+          set -euo pipefail
+          for crate in transport-decision transport-locator; do
+            python3 crates/pretzel-4-4/scripts/run_counted_tests.py cargo test --locked --release --manifest-path "crates/pretzel-5-5/samplers/$crate/Cargo.toml" --lib -- --test-threads=1
+          done
+      - name: Replay the known-answer transcript twice
+        working-directory: crates/pretzel-5-5
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/level5-replay"
+          cargo build --locked --release --features "conformance${WIPE:+,$WIPE}" --bin conformance_replay
+          for name in first second; do
+            ../../target/release/conformance_replay > "$RUNNER_TEMP/level5-replay/$name.jsonl" 2> "$RUNNER_TEMP/level5-replay/$name.stderr"
+            test ! -s "$RUNNER_TEMP/level5-replay/$name.stderr"
+            test "$(wc -c < "$RUNNER_TEMP/level5-replay/$name.jsonl")" -eq 927340
+            printf '%s  %s\n' 94d211afde9ce23531d22611e9e4b70cb32915b35b97dd04ed00f91637b497cb "$RUNNER_TEMP/level5-replay/$name.jsonl" | shasum -a 256 -c -
+          done
+          cmp "$RUNNER_TEMP/level5-replay/first.jsonl" "$RUNNER_TEMP/level5-replay/second.jsonl"
+
+  level5-keygen-depth:
+    name: Pretzel-(5,5) key-generation stack depth
+    runs-on: macos-15
+    # stack_depth_ci.py budgets its observations for this limit.
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned toolchain
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" --profile minimal
+      - name: Test the stack-depth checkers
+        run: python3 -B -m unittest discover -s crates/pretzel-5-5/scripts -p 'test_stack_depth*.py'
+      # With the feature stack-wipe, key generation erases 131072 bytes of
+      # stack. The script builds the release image with that feature, bounds
+      # the depth of key generation from its call graph,
+      # observes the depth under the debugger, and requires both to stay
+      # 32768 bytes below the erased extent.
+      - name: Bound and observe the stack depth of key generation
+        run: python3 -B crates/pretzel-5-5/scripts/stack_depth_ci.py --output "$RUNNER_TEMP/keygen-depth"
+      - name: Upload the release image and the depth reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: level5-keygen-depth
+          path: ${{ runner.temp }}/keygen-depth/
+          if-no-files-found: error
+
+  level5-import-scrub:
+    name: Pretzel-(5,5) key-import stack scrub
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require Apple silicon, macOS 15.2 and the CPU features the crates use
+        run: |
+          set -euo pipefail
+          sw_vers
+          test "$(uname -m)" = arm64
+          for feature in FEAT_DIT FEAT_SHA3 FEAT_DotProd; do
+            test "$(sysctl -n "hw.optional.arm.$feature")" = 1
+          done
+          python3 -c 'import platform; assert tuple(map(int, platform.mac_ver()[0].split(".")[:2])) >= (15, 2)'
+          xcrun --sdk macosx clang --version
+      - name: Install the pinned toolchain
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" --profile minimal
+      # With the feature stack-wipe, the key import erases 393216 bytes of
+      # stack below PreparedSk::new. The
+      # test paints the stack, imports valid keys and invalid encodings, and
+      # requires the erased range to be zero and the paint beyond it to be
+      # intact. It observes the optimized test image; it does not bound the
+      # stack depth of the import.
+      - name: Paint the stack around the key import
+        env:
+          RUSTFLAGS: -C target-feature=+sha3,+dotprod
+        run: python3 crates/pretzel-4-4/scripts/run_counted_tests.py cargo test --locked --release --manifest-path crates/pretzel-5-5/Cargo.toml --features stack-wipe --test api key_import_erases_the_stack_below_its_entry -- --exact --test-threads=1 --nocapture
+      # The library tests that inject a panic into the import and reject keys:
+      # the scrub completes once and with the timing mode on, and the stack
+      # after an import that unwinds is compared with a reference unwind. Both
+      # tests must have run and passed by name.
+      - name: Observe the scrub when the import unwinds or rejects the key
+        env:
+          RUSTFLAGS: -C target-feature=+sha3,+dotprod
+        run: |
+          set -euo pipefail
+          python3 crates/pretzel-4-4/scripts/run_counted_tests.py cargo test --locked --release --manifest-path crates/pretzel-5-5/Cargo.toml --features stack-wipe --lib -- --test-threads=1 --show-output real_constructor_unwind_and_post_parse_rejection_retire_temporaries hash_consistent_malformed_shell_key_observes_constructor_temporaries | tee "$RUNNER_TEMP/import-scrub-library.txt"
+          for name in real_constructor_unwind_and_post_parse_rejection_retire_temporaries hash_consistent_malformed_shell_key_observes_constructor_temporaries; do
+            grep -qF "::$name ... ok" "$RUNNER_TEMP/import-scrub-library.txt"
+          done
+
+  rust:
+    name: Rust checks
+    runs-on: macos-15
+    needs: [fmt, clippy, typos, deny, doc, generated, certificate, reference-certificates, comparison-self-test, test-pretzel, test-level3, test-level5, level5-keygen-depth, level5-import-scrub]
+    if: always()
+    steps:
+      - name: Check the results of every job
+        run: |
+          set -euo pipefail
+          status=0
+          for result in \
+            "fmt=${{ needs.fmt.result }}" \
+            "clippy=${{ needs.clippy.result }}" \
+            "typos=${{ needs.typos.result }}" \
+            "deny=${{ needs.deny.result }}" \
+            "doc=${{ needs.doc.result }}" \
+            "generated=${{ needs.generated.result }}" \
+            "certificate=${{ needs.certificate.result }}" \
+            "reference-certificates=${{ needs.reference-certificates.result }}" \
+            "comparison-self-test=${{ needs.comparison-self-test.result }}" \
+            "test-pretzel=${{ needs.test-pretzel.result }}" \
+            "test-level3=${{ needs.test-level3.result }}" \
+            "test-level5=${{ needs.test-level5.result }}" \
+            "level5-keygen-depth=${{ needs.level5-keygen-depth.result }}" \
+            "level5-import-scrub=${{ needs.level5-import-scrub.result }}"; do
+            if [ "${result#*=}" != success ]; then
+              echo "Rust check result: $result"
+              status=1
+            fi
+          done
+          exit "$status"

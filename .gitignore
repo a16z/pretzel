@@ -1,0 +1,9 @@
+# Cargo build output (the workspace, and the separate diagnostics package).
+target/
+
+# Python bytecode from the check scripts.
+__pycache__/
+*.pyc
+
+# macOS metadata.
+.DS_Store

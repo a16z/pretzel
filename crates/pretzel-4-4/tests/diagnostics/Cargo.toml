@@ -1,0 +1,16 @@
+[package]
+name = "pretzel-4-4-diagnostics-tests"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+autobins = false
+
+[workspace]
+
+[dependencies]
+zeroize = "=1.9.0"
+
+[[test]]
+name = "private-diagnostics"
+path = "private_diagnostics.rs"

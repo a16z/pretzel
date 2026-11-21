@@ -1,0 +1,42 @@
+# cargo-deny policy: advisories, licences, duplicate versions and dependency
+# sources. The check runs on the workspace manifest at the repository root and
+# on the separate diagnostics test package
+# (`cargo deny --manifest-path <manifest> check`).
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# Unmaintained notices fail only for direct dependencies.
+unmaintained = "workspace"
+# Add RUSTSEC ids here with a comment naming the reason and the owner.
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+# The licences that occur in the licence expressions of the locked registry
+# packages and of the packages of this repository. Every package offers MIT
+# or Apache-2.0; one package also offers Apache-2.0 with the LLVM exception.
+# A dependency under any other licence is a policy change.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+]
+
+[bans]
+multiple-versions = "warn"
+# Path dependencies inside this repository carry no version requirement, which
+# cargo-deny classifies as a wildcard; the lockfiles pin them exactly.
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# No git dependency exists; a git source is a policy change.
+allow-git = []

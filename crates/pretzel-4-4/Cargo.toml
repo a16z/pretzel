@@ -1,0 +1,38 @@
+[package]
+name = "pretzel-4-4"
+version = "0.5.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Pretzel-(4,4) signatures, 1361 bytes (research implementation)"
+license.workspace = true
+publish = false
+autobins = false
+autotests = false
+autoexamples = false
+autobenches = false
+
+[features]
+# Test-only logical entropy hook. Never enable in applications.
+conformance = ["pretzel-4-4-core/conformance"]
+# Off by default. Zeroes a fixed range of stack after key generation, after the
+# import of a stored secret key and after signing; see the README.
+stack-wipe = ["pretzel-4-4-core/stack-wipe"]
+
+[lib]
+path = "src/lib.rs"
+
+[target.'cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"), target_endian = "little"))'.dependencies]
+pretzel-4-4-core = { path = "core" }
+
+[[test]]
+name = "api"
+path = "tests/api.rs"
+
+[[test]]
+name = "spec-domains"
+path = "tests/spec_domains_driver.rs"
+
+[[test]]
+name = "dit"
+path = "tests/dit.rs"

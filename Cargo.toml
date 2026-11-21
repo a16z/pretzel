@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+# Every member shares the lockfile, the profiles and the target directory of
+# this manifest. crates/pretzel-4-4/core and the three sampler crates are path
+# dependencies of the crates above them. crates/pretzel-4-4/tests/diagnostics
+# is not a member: its manifest declares its own workspace, and it keeps its
+# own lockfile.
+members = [
+    "crates/pretzel-3-3",
+    "crates/pretzel-4-4",
+    "crates/pretzel-4-4/core",
+    "crates/pretzel-5-5",
+    "crates/pretzel-5-5/samplers/proposal",
+    "crates/pretzel-5-5/samplers/transport-decision",
+    "crates/pretzel-5-5/samplers/transport-locator",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/a16z/pretzel"
+publish = false
+
+[workspace.dependencies]
+sha3 = { version = "0.10.9", features = ["zeroize"] }
+keccak = { version = "0.1" }
+getrandom = "0.2"
+zeroize = "1.9"
+libc = { version = "=0.2.189" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -1,0 +1,38 @@
+# Spelling allowlist for `typos` (CI job `typos`). Every entry is a term of
+# art or a name that the default dictionary misreads as an English typo, with a
+# comment saying what it is.
+[default]
+# Eight hexadecimal digits in quotes: the short digests that the tests of the
+# generated sampler inputs print and compare.
+extend-ignore-re = ['"[0-9a-f]{8}"']
+
+[default.extend-words]
+# AArch64 instruction (AND, setting flags) in the assembly sources.
+ands = "ands"
+# Inverse zeta tables of the 32-bit transform (`iz`, `izr`, `izq`).
+iz = "iz"
+# Number of draws in the sampler tests.
+nd = "nd"
+# High half of the Barrett quotient estimate in the NEON reduction.
+thi = "thi"
+
+[files]
+# Known-answer files, fixtures and tables. Their bytes are compared or hashed
+# by tests, so a spelling correction would be a change of data.
+extend-exclude = [
+  "*.bin",
+  "*.bin.part*",
+  "Cargo.lock",
+  "crates/pretzel-4-4/kat/pretzel-kat.txt",
+  "crates/pretzel-4-4/kat/transport_vectors.txt",
+  "crates/pretzel-3-3/conformance/known-answer.txt",
+  "crates/pretzel-3-3/conformance/keygen-digests.json",
+  "crates/pretzel-3-3/certificates/rank3-spread/*.json",
+  "crates/pretzel-5-5/certificates/rank5-dither/*.json",
+  "crates/pretzel-4-4/certificates/rank4-spread/*.json",
+  "crates/pretzel-4-4/tests/native/*.json",
+  "**/ct_alias_fixtures.txt",
+  "licenses/",
+  # Licence text of the paper, reproduced verbatim.
+  "paper/LICENSE-CC-BY-4.0",
+]
